@@ -1,0 +1,8 @@
+[
+  {"tool": "get_claim_status", "arguments": {"claimId": "C-1001"}, "expect": "ALLOW"},
+  {"tool": "file_claim", "arguments": {"contractId": "K-1", "claimType": "auto", "amount": 500, "policyTermMonths": 12}, "expect": "ALLOW"},
+  {"tool": "file_claim", "arguments": {"contractId": "K-1", "claimType": "auto", "amount": 5000.5, "policyTermMonths": 12}, "expect": "DENY"},
+  {"tool": "file_claim", "arguments": {"contractId": "K-1", "claimType": "property", "amount": 200, "policyTermMonths": 12}, "expect": "DENY"},
+  {"tool": "approve_claim", "arguments": {"claimId": "C-1001", "approved": true, "approvedAmountCents": 50000}, "expect": "ALLOW"},
+  {"tool": "approve_claim", "arguments": {"claimId": "C-1001", "approved": true, "approvedAmountCents": 250000}, "expect": "DENY"}
+]

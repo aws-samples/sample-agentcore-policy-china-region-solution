@@ -1,0 +1,15 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Policy in AgentCore engine for the Cedar interceptor comparison demo (global region only)
+
+Resources:
+  PolicyEngine:
+    Type: AWS::BedrockAgentCore::PolicyEngine
+    Properties:
+      Name: !Join ["_", !Split ["-", !Sub "${AWS::StackName}"]]
+      Description: Reference Cedar enforcement for the China interceptor demo
+
+Outputs:
+  PolicyEngineArn:
+    Value: !GetAtt PolicyEngine.PolicyEngineArn
+  PolicyEngineId:
+    Value: !GetAtt PolicyEngine.PolicyEngineId

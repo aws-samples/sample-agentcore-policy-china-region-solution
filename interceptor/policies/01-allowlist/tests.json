@@ -1,0 +1,5 @@
+[
+  {"tool": "get_claim_status", "arguments": {"claimId": "C-1001"}, "expect": "ALLOW"},
+  {"tool": "file_claim", "arguments": {"contractId": "K-1", "claimType": "auto", "amount": 500, "policyTermMonths": 12}, "expect": "DENY"},
+  {"tool": "delete_claim", "arguments": {"claimId": "C-1001"}, "expect": "DENY"}
+]

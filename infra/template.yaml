@@ -1,0 +1,273 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  AgentCore Gateway with an InsuranceAPI Lambda target. In China the gateway
+  uses a Lambda interceptor that evaluates Cedar policies; in a global region
+  it attaches a Policy in AgentCore engine instead.
+
+Parameters:
+  OidcDiscoveryUrl:
+    Type: String
+    Description: OpenID Connect discovery URL of your identity provider (Auth0 by default)
+    AllowedPattern: "^https://.+/\\.well-known/openid-configuration$"
+  OidcAudience:
+    Type: String
+    Description: Audience (aud claim) the gateway accepts
+  OidcClientSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: >-
+      Client secret of the demo client, stored in Secrets Manager for scripts/demo.py.
+      Leave empty to skip creating the secret (for example in the global control stack).
+  GatewayName:
+    Type: String
+    Default: cedar-demo-gw
+  TargetName:
+    Type: String
+    Default: InsuranceAPI
+  EnableInterceptor:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  PolicyEngineArn:
+    Type: String
+    Default: ""
+    Description: Policy engine ARN to attach (global region). Leave empty in China.
+  PolicyScenario:
+    Type: String
+    Default: 01-allowlist
+  InterceptorGatewayArn:
+    Type: String
+    Default: ""
+    Description: >-
+      ARN of this stack's gateway, fed back on the second deploy pass so the
+      interceptor knows its Cedar resource (avoids a circular reference).
+  DemoPrincipalSub:
+    Type: String
+    Default: ""
+
+Conditions:
+  UseInterceptor: !Equals [!Ref EnableInterceptor, "true"]
+  UsePolicyEngine: !Not [!Equals [!Ref PolicyEngineArn, ""]]
+  StoreClientSecret: !Not [!Equals [!Ref OidcClientSecret, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+    MemorySize: 512
+    Timeout: 10
+
+Resources:
+  ToolFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-insurance-tool"
+      Description: Mock InsuranceAPI tools behind the gateway
+      CodeUri: ../tools/claims_tool/
+      Handler: claims_tool.lambda_handler
+
+  ToolLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ToolFunction}"
+      RetentionInDays: 14
+
+  InterceptorFunction:
+    Type: AWS::Serverless::Function
+    Condition: UseInterceptor
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-cedar-interceptor"
+      Description: Cedar policy enforcement as an AgentCore Gateway REQUEST and RESPONSE interceptor
+      CodeUri: ../build/interceptor/
+      Handler: handler.lambda_handler
+      Environment:
+        Variables:
+          GATEWAY_ARN: !Ref InterceptorGatewayArn
+          POLICY_SCENARIO: !Ref PolicyScenario
+          PRINCIPAL_SUB: !Ref DemoPrincipalSub
+
+  InterceptorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: UseInterceptor
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${InterceptorFunction}"
+      RetentionInDays: 14
+
+  SecretKey:
+    Type: AWS::KMS::Key
+    Condition: StoreClientSecret
+    Properties:
+      Description: Encrypts the demo OIDC client secret
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: UseThroughSecretsManagerOnly
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: [kms:Decrypt, kms:GenerateDataKey*, kms:DescribeKey]
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                kms:ViaService: !Sub "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+
+  ClientSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: StoreClientSecret
+    Properties:
+      Name: !Sub "${AWS::StackName}/oidc-client-secret"
+      Description: OIDC client secret used by scripts/demo.py to request access tokens
+      KmsKeyId: !Ref SecretKey
+      SecretString: !Ref OidcClientSecret
+
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: invoke-target-and-interceptor
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !If
+                  - UseInterceptor
+                  - [!GetAtt ToolFunction.Arn, !GetAtt InterceptorFunction.Arn]
+                  - [!GetAtt ToolFunction.Arn]
+        - !If
+          - UsePolicyEngine
+          - PolicyName: evaluate-policy-engine
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - bedrock-agentcore:AuthorizeAction
+                    - bedrock-agentcore:PartiallyAuthorizeActions
+                  Resource:
+                    - !Ref PolicyEngineArn
+                    - !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*"
+                - Effect: Allow
+                  Action: bedrock-agentcore:GetPolicyEngine
+                  Resource: !Ref PolicyEngineArn
+          - !Ref AWS::NoValue
+
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Ref GatewayName
+      Description: Cedar policy comparison demo gateway
+      RoleArn: !GetAtt GatewayRole.Arn
+      ProtocolType: MCP
+      ExceptionLevel: DEBUG
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref OidcDiscoveryUrl
+          AllowedAudience: [!Ref OidcAudience]
+      InterceptorConfigurations: !If
+        - UseInterceptor
+        - - Interceptor:
+              Lambda:
+                Arn: !GetAtt InterceptorFunction.Arn
+            InterceptionPoints: [REQUEST, RESPONSE]
+            InputConfiguration:
+              PassRequestHeaders: true
+        - !Ref AWS::NoValue
+      PolicyEngineConfiguration: !If
+        - UsePolicyEngine
+        - Arn: !Ref PolicyEngineArn
+          Mode: ENFORCE
+        - !Ref AWS::NoValue
+
+  GatewayTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
+      Name: !Ref TargetName
+      Description: Mock insurance claims tools
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !GetAtt ToolFunction.Arn
+            # Keep in sync with interceptor/tool_schema.json (enforced by tests/test_template.py)
+            ToolSchema:
+              InlinePayload:
+                - Name: get_claim_status
+                  Description: Check the status of an insurance claim.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      claimId: {Type: string, Description: The claim identifier}
+                    Required: [claimId]
+                - Name: file_claim
+                  Description: File an insurance claim.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      contractId: {Type: string, Description: The insurance contract identifier}
+                      claimType: {Type: string, Description: "Type of claim: health, property, or auto"}
+                      amount: {Type: number, Description: Claim amount}
+                      policyTermMonths: {Type: integer, Description: "Length of the policy term, in months"}
+                      description: {Type: string, Description: Claim description}
+                    Required: [contractId, claimType, amount, policyTermMonths]
+                - Name: approve_claim
+                  Description: Approve a filed claim.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      claimId: {Type: string, Description: The claim identifier}
+                      approved: {Type: boolean, Description: Whether the claim is approved}
+                      approvedAmountCents: {Type: integer, Description: "Approved amount, in cents"}
+                    Required: [claimId, approved, approvedAmountCents]
+                - Name: disburse_payment
+                  Description: Disburse payment for an approved claim.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      claimId: {Type: string, Description: The claim identifier}
+                      amountCents: {Type: integer, Description: "Amount to disburse, in cents"}
+                    Required: [claimId, amountCents]
+                - Name: delete_claim
+                  Description: Permanently delete a claim record.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      claimId: {Type: string, Description: The claim identifier}
+                    Required: [claimId]
+
+Outputs:
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+  GatewayId:
+    Value: !GetAtt Gateway.GatewayIdentifier
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
+  InterceptorFunctionName:
+    Condition: UseInterceptor
+    Value: !Ref InterceptorFunction
+  ClientSecretArn:
+    Condition: StoreClientSecret
+    Value: !Ref ClientSecret

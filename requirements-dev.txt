@@ -1,0 +1,4 @@
+-r scripts/requirements.txt
+-r interceptor/requirements.txt
+pytest>=8
+pyyaml>=6

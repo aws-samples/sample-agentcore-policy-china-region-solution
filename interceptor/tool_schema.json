@@ -1,0 +1,60 @@
+[
+  {
+    "name": "get_claim_status",
+    "description": "Check the status of an insurance claim.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {"claimId": {"type": "string", "description": "The claim identifier"}},
+      "required": ["claimId"]
+    }
+  },
+  {
+    "name": "file_claim",
+    "description": "File an insurance claim.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "contractId": {"type": "string", "description": "The insurance contract identifier"},
+        "claimType": {"type": "string", "description": "Type of claim: health, property, or auto"},
+        "amount": {"type": "number", "description": "Claim amount"},
+        "policyTermMonths": {"type": "integer", "description": "Length of the policy term, in months"},
+        "description": {"type": "string", "description": "Claim description"}
+      },
+      "required": ["contractId", "claimType", "amount", "policyTermMonths"]
+    }
+  },
+  {
+    "name": "approve_claim",
+    "description": "Approve a filed claim.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "claimId": {"type": "string", "description": "The claim identifier"},
+        "approved": {"type": "boolean", "description": "Whether the claim is approved"},
+        "approvedAmountCents": {"type": "integer", "description": "Approved amount, in cents"}
+      },
+      "required": ["claimId", "approved", "approvedAmountCents"]
+    }
+  },
+  {
+    "name": "disburse_payment",
+    "description": "Disburse payment for an approved claim.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "claimId": {"type": "string", "description": "The claim identifier"},
+        "amountCents": {"type": "integer", "description": "Amount to disburse, in cents"}
+      },
+      "required": ["claimId", "amountCents"]
+    }
+  },
+  {
+    "name": "delete_claim",
+    "description": "Permanently delete a claim record.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {"claimId": {"type": "string", "description": "The claim identifier"}},
+      "required": ["claimId"]
+    }
+  }
+]

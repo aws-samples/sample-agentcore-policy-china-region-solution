@@ -1,0 +1,5 @@
+[
+  {"tool": "get_claim_status", "arguments": {"claimId": "C-1001"}, "expect": "ALLOW"},
+  {"tool": "approve_claim", "arguments": {"claimId": "C-1001", "approved": true, "approvedAmountCents": 50000}, "expect": "ALLOW"},
+  {"tool": "delete_claim", "arguments": {"claimId": "C-1001"}, "expect": "DENY"}
+]

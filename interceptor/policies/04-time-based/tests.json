@@ -1,0 +1,5 @@
+[
+  {"tool": "get_claim_status", "arguments": {"claimId": "C-1001"}, "expect": "ALLOW"},
+  {"tool": "disburse_payment", "arguments": {"claimId": "C-1001", "amountCents": 10000}, "expect": "TIME_09_17"},
+  {"tool": "file_claim", "arguments": {"contractId": "K-1", "claimType": "auto", "amount": 500, "policyTermMonths": 12}, "expect": "DENY"}
+]
