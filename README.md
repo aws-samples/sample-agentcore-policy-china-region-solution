@@ -81,7 +81,7 @@ scripts/deploy.sh                  # 首次运行会提示输入 Client Secret�
 scripts/demo.sh                    # 依次激活并演示全部 5 个场景
 ```
 
-`deploy.sh` 依次完成以下工作，约需 5 分钟：
+`deploy.sh` 依次完成以下工作。实测同时部署中国区和海外对照组约 7 分钟，只部署中国区会更快：
 
 1. 检查 profile 是否为中国区身份，并向身份提供方申请一次测试令牌，确认配置无误。
    令牌中的 `sub` 会作为演示主体，供场景 05 使用。
@@ -98,17 +98,19 @@ scripts/demo.sh 03-input-condition -v    # 单个场景，并打印每次调用�
 scripts/demo.sh --region both            # 同时对比海外对照组（需先启用，见下文）
 ```
 
-输出示例：
+输出示例（启用了海外对照组，`global` 列是 Policy in AgentCore 的判定）：
 
 ```
-=== 02-forbid-sensitive   (UTC 07:56)
-tool               arguments                     expected cn       match
--------------------------------------------------------------------------
-get_claim_status   {"claimId":"C-1001"}          ALLOW    ALLOW    OK
-approve_claim      {"claimId":"C-1001",...}      ALLOW    ALLOW    OK
-delete_claim       {"claimId":"C-1001"}          DENY     DENY     OK
+=== 02-forbid-sensitive   (UTC 09:56)
+tool               arguments                                                  expected cn       global    match
+---------------------------------------------------------------------------------------------------------------
+get_claim_status   {"claimId":"C-1001"}                                       ALLOW    ALLOW    ALLOW     OK
+approve_claim      {"claimId":"C-1001","approved":true,"approvedAmountCent... ALLOW    ALLOW    ALLOW     OK
+delete_claim       {"claimId":"C-1001"}                                       DENY     DENY     DENY      OK
 tools/list  expected ['approve_claim', 'disburse_payment', 'file_claim', 'get_claim_status']
             cn       ['approve_claim', 'disburse_payment', 'file_claim', 'get_claim_status']  OK
+            global   ['approve_claim', 'disburse_payment', 'file_claim', 'get_claim_status']  OK
+result: 3/3 calls match, tools/list matches
 ```
 
 ## 演示场景
