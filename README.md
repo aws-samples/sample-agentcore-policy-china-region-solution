@@ -72,8 +72,8 @@ Gateway 会通过公网读取身份提供方的 OIDC discovery 和 JWKS，运行
 ## 快速开始
 
 ```bash
-git clone <本仓库地址>
-cd sample-agentcore-gateway-cedar-interceptor
+git clone https://github.com/aws-samples/sample-agentcore-policy-china-region-solution.git
+cd sample-agentcore-policy-china-region-solution
 cp config.env.example config.env
 vi config.env                      # 填写 CN_PROFILE、OIDC_DISCOVERY_URL、OIDC_AUDIENCE、OIDC_CLIENT_ID
 
@@ -258,3 +258,11 @@ Client Secret 输错时，用 `OIDC_CLIENT_SECRET=<正确值> scripts/deploy.sh`
 换用其他身份提供方时，请按实际令牌内容调整策略和 `tests.json`。
 
 **想部署到宁夏区域。** 在 `config.env` 中设置 `CN_REGION=cn-northwest-1`。
+
+## Security
+
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+
+## License
+
+This library is licensed under the MIT-0 License. See the LICENSE file.
