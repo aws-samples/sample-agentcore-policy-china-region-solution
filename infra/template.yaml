@@ -113,12 +113,11 @@ Resources:
           - Sid: UseThroughSecretsManagerOnly
             Effect: Allow
             Principal:
-              AWS: "*"
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
             Action: [kms:Decrypt, kms:GenerateDataKey*, kms:DescribeKey]
             Resource: "*"
             Condition:
               StringEquals:
-                kms:CallerAccount: !Ref AWS::AccountId
                 kms:ViaService: !Sub "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
 
   ClientSecret:

@@ -7,54 +7,65 @@ cn:     point the interceptor Lambda at the scenario folder (POLICY_SCENARIO env
 import argparse
 import os
 import sys
-import time
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, WaiterError
+from botocore.waiter import NormalizedOperationMethod, Waiter, WaiterModel
 
 import common
 
 
-TRANSITIONAL = {"CREATING", "UPDATING", "DELETING"}
+POLL_SECONDS = 3
+MAX_ATTEMPTS = 100
+STABLE = ("ACTIVE", "CREATE_FAILED", "UPDATE_FAILED", "DELETE_FAILED")
+NOT_FOUND = "ResourceNotFoundException"
 
 
-def wait_policy(client, engine_id, policy_id, want, timeout=180, not_found_grace=30):
-    """Poll a policy until it reaches `want`, a terminal *_FAILED state, or disappears.
+def _waiter_model():
+    """Custom GetPolicy waiters. botocore does the polling, including the delay between calls.
 
-    Returns the policy dict, {"status": "SETTLED"...} when want == "SETTLED" and the
-    policy left every transitional state, or None once it no longer exists. GetPolicy
-    can briefly return NotFound right after CreatePolicy, so NotFound is retried for
-    `not_found_grace` seconds unless we are waiting for deletion.
+    The built-in policy_active waiter fails on the brief ResourceNotFound that GetPolicy
+    returns right after CreatePolicy, so these retry on it instead.
     """
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            p = client.get_policy(policyEngineId=engine_id, policyId=policy_id)
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "ResourceNotFoundException":
-                raise
-            if want == "DELETED" or time.time() - start > not_found_grace:
-                return None
-            time.sleep(3)
-            continue
-        status = p.get("status")
-        if status == want or (status and status.endswith("FAILED")):
-            return p
-        if want == "SETTLED" and status not in TRANSITIONAL:
-            return p
-        time.sleep(3)
-    raise SystemExit(f"timed out waiting for policy {policy_id} to become {want}")
+    on_status = [{"state": "success", "matcher": "path", "argument": "status", "expected": s} for s in STABLE]
+    waiters = {
+        "PolicyStable": on_status + [{"state": "retry", "matcher": "error", "expected": NOT_FOUND}],
+        "PolicyStableOrGone": on_status + [{"state": "success", "matcher": "error", "expected": NOT_FOUND}],
+        "PolicyGone": [
+            {"state": "success", "matcher": "error", "expected": NOT_FOUND},
+            {"state": "failure", "matcher": "path", "argument": "status", "expected": "DELETE_FAILED"},
+        ],
+    }
+    return WaiterModel({"version": 2, "waiters": {
+        name: {"operation": "GetPolicy", "delay": POLL_SECONDS, "maxAttempts": MAX_ATTEMPTS, "acceptors": acceptors}
+        for name, acceptors in waiters.items()
+    }})
+
+
+def _wait(client, name, engine_id, policy_id):
+    waiter = Waiter(name, _waiter_model().get_waiter(name), NormalizedOperationMethod(client.get_policy))
+    try:
+        waiter.wait(policyEngineId=engine_id, policyId=policy_id,
+                    WaiterConfig={"Delay": POLL_SECONDS, "MaxAttempts": MAX_ATTEMPTS})
+    except WaiterError as e:
+        raise SystemExit(f"timed out or failed waiting for policy {policy_id} ({name}): {e}") from None
+
+
+def wait_policy(client, engine_id, policy_id):
+    """Wait until the policy is ACTIVE or *_FAILED, then return it so callers can read statusReasons."""
+    _wait(client, "PolicyStable", engine_id, policy_id)
+    return client.get_policy(policyEngineId=engine_id, policyId=policy_id)
 
 
 def delete_policy(client, engine_id, policy_id):
     """Delete once the policy is out of any transitional state; tolerate it already being gone."""
-    if wait_policy(client, engine_id, policy_id, "SETTLED", not_found_grace=0) is None:
-        return
+    _wait(client, "PolicyStableOrGone", engine_id, policy_id)
     try:
         client.delete_policy(policyEngineId=engine_id, policyId=policy_id)
     except ClientError as e:
-        if e.response["Error"]["Code"] != "ResourceNotFoundException":
+        if e.response["Error"]["Code"] != NOT_FOUND:
             raise
-    wait_policy(client, engine_id, policy_id, "DELETED")
+        return
+    _wait(client, "PolicyGone", engine_id, policy_id)
 
 
 FINDING_PREFIXES = ("Overly Permissive:", "Overly Restrictive:")
@@ -77,7 +88,7 @@ def create(client, engine_id, name, statement, description):
             policyEngineId=engine_id, name=name, definition={"cedar": {"statement": statement}},
             validationMode=mode, description=description,
         )
-        p = wait_policy(client, engine_id, created["policyId"], "ACTIVE")
+        p = wait_policy(client, engine_id, created["policyId"])
         if p.get("status") == "ACTIVE":
             return mode
         reasons = p.get("statusReasons") or []

@@ -1,5 +1,7 @@
 import os
 import sys
+
+import pytest
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
@@ -65,46 +67,76 @@ def test_findings_only_detection():
 
 
 class FakeClient:
-    """Minimal bedrock-agentcore-control stand-in driven by a list of GetPolicy outcomes."""
+    """Minimal bedrock-agentcore-control stand-in driven by a list of GetPolicy outcomes.
+
+    When the list runs out the last outcome repeats. "GONE" means ResourceNotFound.
+    """
 
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
+        self.last = "GONE"
         self.deleted = []
+        self.calls = 0
+
+    def _not_found(self, op):
+        from botocore.exceptions import ClientError
+        return ClientError({"Error": {"Code": "ResourceNotFoundException", "Message": "x"}}, op)
 
     def get_policy(self, policyEngineId, policyId):
-        from botocore.exceptions import ClientError
-
-        nxt = self.outcomes.pop(0) if self.outcomes else "GONE"
-        if nxt == "GONE":
-            raise ClientError({"Error": {"Code": "ResourceNotFoundException", "Message": "x"}}, "GetPolicy")
-        return {"policyId": policyId, "status": nxt}
+        self.calls += 1
+        if self.outcomes:
+            self.last = self.outcomes.pop(0)
+        if self.last == "GONE":
+            raise self._not_found("GetPolicy")
+        return {"policyId": policyId, "status": self.last}
 
     def delete_policy(self, policyEngineId, policyId):
+        if self.last == "GONE":
+            raise self._not_found("DeletePolicy")
         self.deleted.append(policyId)
 
 
-def test_wait_retries_not_found_right_after_create(monkeypatch):
-    monkeypatch.setattr(switch_scenario.time, "sleep", lambda s: None)
+@pytest.fixture(autouse=False)
+def fast_poll(monkeypatch):
+    monkeypatch.setattr(switch_scenario, "POLL_SECONDS", 0)
+
+
+def test_wait_retries_not_found_right_after_create(fast_poll):
     c = FakeClient(["GONE", "CREATING", "ACTIVE"])
-    assert switch_scenario.wait_policy(c, "e", "p", "ACTIVE")["status"] == "ACTIVE"
+    assert switch_scenario.wait_policy(c, "e", "p")["status"] == "ACTIVE"
 
 
-def test_delete_waits_for_creating_to_settle(monkeypatch):
-    monkeypatch.setattr(switch_scenario.time, "sleep", lambda s: None)
+def test_wait_returns_failed_policy_for_inspection(fast_poll):
+    c = FakeClient(["CREATING", "CREATE_FAILED"])
+    assert switch_scenario.wait_policy(c, "e", "p")["status"] == "CREATE_FAILED"
+
+
+def test_delete_waits_for_creating_to_settle(fast_poll):
     c = FakeClient(["CREATING", "CREATING", "ACTIVE", "DELETING", "GONE"])
     switch_scenario.delete_policy(c, "e", "p")
     assert c.deleted == ["p"] and c.outcomes == []
 
 
-def test_delete_of_missing_policy_is_a_no_op(monkeypatch):
-    monkeypatch.setattr(switch_scenario.time, "sleep", lambda s: None)
+def test_delete_of_missing_policy_is_a_no_op(fast_poll):
     c = FakeClient(["GONE"])
     switch_scenario.delete_policy(c, "e", "p")
     assert c.deleted == []
 
 
-def test_create_falls_back_only_for_findings(monkeypatch):
-    monkeypatch.setattr(switch_scenario.time, "sleep", lambda s: None)
+def test_wait_gives_up_after_max_attempts(fast_poll, monkeypatch):
+    monkeypatch.setattr(switch_scenario, "MAX_ATTEMPTS", 3)
+    c = FakeClient(["CREATING"])
+    with pytest.raises(SystemExit, match="timed out|Max attempts"):
+        switch_scenario.wait_policy(c, "e", "p")
+    assert c.calls == 3
+
+
+def test_no_sleep_calls_in_switch_scenario():
+    src = open(switch_scenario.__file__, encoding="utf-8").read()
+    assert "time.sleep" not in src
+
+
+def test_create_falls_back_only_for_findings(fast_poll):
 
     class C(FakeClient):
         def __init__(self, first_status, reasons):
@@ -114,7 +146,7 @@ def test_create_falls_back_only_for_findings(monkeypatch):
         def create_policy(self, **kw):
             self.modes.append(kw["validationMode"])
             ok = len(self.modes) > 1
-            self.outcomes = ["ACTIVE"] if ok else [self.first, "GONE"]
+            self.outcomes = ["ACTIVE"] if ok else [self.first, self.first, "GONE"]
             return {"policyId": f"p{len(self.modes)}"}
 
         def get_policy(self, policyEngineId, policyId):
@@ -127,8 +159,59 @@ def test_create_falls_back_only_for_findings(monkeypatch):
     assert switch_scenario.create(c, "e", "n", "permit(principal,action,resource);", "d") == "IGNORE_ALL_FINDINGS"
     assert c.modes == ["FAIL_ON_ANY_FINDINGS", "IGNORE_ALL_FINDINGS"]
 
-    import pytest
     c = C("CREATE_FAILED", ["unexpected type: expected Long but saw decimal"])
     with pytest.raises(SystemExit):
         switch_scenario.create(c, "e", "n", "x", "d")
     assert c.modes == ["FAIL_ON_ANY_FINDINGS"]
+
+
+# --- config.env parsing without a shell ---------------------------------------
+
+def write_cfg(tmp_path, text):
+    p = tmp_path / "config.env"
+    p.write_text(text, encoding="utf-8")
+    return str(p)
+
+
+def test_config_defaults_and_env_override(tmp_path, monkeypatch):
+    monkeypatch.delenv("A", raising=False)
+    monkeypatch.setenv("B", "from-env")
+    path = write_cfg(tmp_path, "A=${A:-alpha}   # trailing comment\nB=${B:-beta}\n# comment line\n\nC=plain\n")
+    assert common.load_config(path) == {"A": "alpha", "B": "from-env", "C": "plain"}
+
+
+def test_config_empty_env_value_uses_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("A", "")
+    assert common.load_config(write_cfg(tmp_path, "A=${A:-alpha}\n")) == {"A": "alpha"}
+
+
+def test_config_references_earlier_keys_and_nested_defaults(tmp_path, monkeypatch):
+    for k in ("X", "Y", "Z"):
+        monkeypatch.delenv(k, raising=False)
+    path = write_cfg(tmp_path, "X=${X:-x1}\nY=${Y:-$X}\nZ=${Z:-${NOPE:-z-${X}}}\n")
+    assert common.load_config(path) == {"X": "x1", "Y": "x1", "Z": "z-x1"}
+
+
+def test_config_quotes(tmp_path, monkeypatch):
+    monkeypatch.delenv("A", raising=False)
+    path = write_cfg(tmp_path, "A='{{lit:$X}}'  # c\nB=\"two words\"\nU=https://x/y#frag\n")
+    assert common.load_config(path) == {"A": "{{lit:$X}}", "B": "two words", "U": "https://x/y#frag"}
+
+
+@pytest.mark.parametrize("value", ["$(whoami)", "`whoami`", "${A:=x}"])
+def test_config_rejects_shell_features(tmp_path, value):
+    with pytest.raises(SystemExit, match="unsupported"):
+        common.load_config(write_cfg(tmp_path, f"A={value}\n"))
+
+
+def test_example_config_parses_to_expected_keys(monkeypatch):
+    for k in ("CN_PROFILE", "CN_REGION", "ENABLE_GLOBAL", "STACK_PREFIX"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = common.load_config(os.path.join(common.ROOT, "config.env.example"))
+    assert cfg["CN_REGION"] == "cn-north-1" and cfg["ENABLE_GLOBAL"] == "false"
+    assert cfg["STACK_PREFIX"] == "cedar-demo" and cfg["OIDC_SCOPE"] == "invoke:agentcore"
+
+
+def test_common_does_not_use_subprocess():
+    src = open(common.__file__, encoding="utf-8").read()
+    assert "subprocess" not in src

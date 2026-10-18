@@ -3,7 +3,6 @@ import base64
 import json
 import os
 import re
-import subprocess
 import urllib.parse
 import urllib.request
 
@@ -14,17 +13,80 @@ POLICY_ROOT = os.path.join(ROOT, "interceptor", "policies")
 CONFIG_FILE = os.environ.get("CEDAR_DEMO_CONFIG", os.path.join(ROOT, "config.env"))
 
 
+_LINE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _strip_value(raw):
+    """Apply bash quoting rules for a single assignment value.
+
+    Returns (text, expand): single-quoted text is literal, everything else is expanded.
+    An unquoted '#' that follows whitespace starts a comment.
+    """
+    raw = raw.strip()
+    if raw[:1] in ("'", '"'):
+        quote = raw[0]
+        close = raw.find(quote, 1)
+        if close < 0:
+            raise SystemExit(f"config.env: unterminated quote in {raw!r}")
+        return raw[1:close], quote == '"'
+    return re.split(r"\s+#", raw, maxsplit=1)[0], True
+
+
+def _expand(text, lookup):
+    """Expand $NAME, ${NAME} and ${NAME:-default} (defaults may nest)."""
+    if "$(" in text or "`" in text:
+        raise SystemExit(f"config.env: unsupported shell syntax in {text!r}")
+    out, i = [], 0
+    while i < len(text):
+        ch = text[i]
+        if ch != "$":
+            out.append(ch)
+            i += 1
+            continue
+        if text[i + 1:i + 2] == "{":
+            depth, j = 1, i + 2
+            while j < len(text) and depth:
+                depth += {"{": 1, "}": -1}.get(text[j], 0)
+                j += 1
+            if depth:
+                raise SystemExit(f"config.env: unbalanced braces in {text!r}")
+            inner = text[i + 2:j - 1]
+            m = _NAME.match(inner)
+            rest = inner[m.end():] if m else None
+            if not m or (rest and not rest.startswith(":-")):
+                raise SystemExit(f"config.env: unsupported expansion ${{{inner}}}")
+            value = lookup(m.group(0))
+            out.append(value if value else (_expand(rest[2:], lookup) if rest else ""))
+            i = j
+            continue
+        m = _NAME.match(text, i + 1)
+        if m:
+            out.append(lookup(m.group(0)))
+            i = m.end()
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def load_config(path=CONFIG_FILE):
-    """Evaluate config.env with bash so ${VAR:-default} overrides from the environment work."""
+    """Read config.env the way `source config.env` would for the syntax the example uses.
+
+    Values already set in the environment win through ${VAR:-default}. No shell is run.
+    """
     if not os.path.isfile(path):
         raise SystemExit(f"{path} not found: copy config.env.example to config.env and fill it in")
-    out = subprocess.run(
-        ["bash", "-c", f"set -a; source {json.dumps(path)}; env -0"],
-        check=True, capture_output=True, text=True,
-    ).stdout
-    env = dict(item.split("=", 1) for item in out.split("\0") if "=" in item)
-    keys = [line.split("=", 1)[0] for line in open(path) if re.match(r"^[A-Z][A-Z0-9_]*=", line)]
-    return {k: env.get(k, "") for k in keys}
+    cfg = {}
+    lookup = lambda name: cfg[name] if name in cfg else os.environ.get(name, "")  # noqa: E731
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            m = _LINE.match(line.rstrip("\n"))
+            if not m:
+                continue
+            text, expand = _strip_value(m.group(2))
+            cfg[m.group(1)] = _expand(text, lookup) if expand else text
+    return cfg
 
 
 CFG = load_config()
